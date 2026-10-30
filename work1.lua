@@ -1,18 +1,3 @@
---[[
-    Build An Ant Empire - Halloween Candy Auto Farm Suite v1.0
-    Author: x2sun and Ud0 (Engineered by cook45 & clack)
-    Target Game: Build An Ant Empire (place=78490532994307)
-    UI Framework: WindUI
-    
-    Features:
-      - 100% Autonomous Halloween Candy Collection: Auto finds and collects Pumpkin Chests
-      - Legitimate Flight Speed (90 studs/s): Mimics in-game Halloween Broom speed (No Ban)
-      - Instant Teleport Mode: Optional instant collection mode for maximum efficiency
-      - Auto Noclip & Ground Clearance: Floats smoothly without tripping or getting stuck
-      - Smart Respawn Tracker: Safely waits when all chests are collected, auto resumes on spawn
-      - Integrated Anti-AFK: Prevents Roblox 20-minute idle disconnection
-]]
-
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
