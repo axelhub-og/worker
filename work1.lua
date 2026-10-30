@@ -1,3 +1,18 @@
+--[[
+    Build An Ant Empire - Halloween Candy Auto Farm Suite v1.0
+    Author: x2sun and Ud0 (Engineered by cook45 & clack)
+    Target Game: Build An Ant Empire (place=78490532994307)
+    UI Framework: WindUI
+    
+    Features:
+      - 100% Autonomous Halloween Candy Collection: Auto finds and collects Pumpkin Chests
+      - Legitimate Flight Speed (90 studs/s): Mimics in-game Halloween Broom speed (No Ban)
+      - Instant Teleport Mode: Optional instant collection mode for maximum efficiency
+      - Auto Noclip & Ground Clearance: Floats smoothly without tripping or getting stuck
+      - Smart Respawn Tracker: Safely waits when all chests are collected, auto resumes on spawn
+      - Integrated Anti-AFK: Prevents Roblox 20-minute idle disconnection
+]]
+
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
@@ -31,8 +46,8 @@ end)
 -- Safe Broom flight speed from game config
 local BROOM_DEFAULT_SPEED = (FlightConfig and FlightConfig.Speed) or 90
 
--- Safe resting spot on Halloween Island
-local HALLOWEEN_RESTING_POS = Vector3.new(885, 65, 230)
+-- Safe resting spot on Halloween Island (Standing ground level is ~55.8)
+local HALLOWEEN_RESTING_POS = Vector3.new(885, 55.8, 230)
 
 -- ============================================================================
 -- 2. LOAD WINDUI
@@ -120,6 +135,11 @@ if getgenv()._AntNoclipConn then
     pcall(function() getgenv()._AntNoclipConn:Disconnect() end)
     getgenv()._AntNoclipConn = nil
 end
+pcall(function()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then hrp.Anchored = false end
+end)
 
 -- ============================================================================
 -- 4. CONFIGURATION STATE
@@ -222,9 +242,31 @@ local function GetAvailablePumpkinChests()
 end
 
 -- ============================================================================
--- 8. SAFE MOVEMENT CONTROLLER (BROOM SPEED GLIDE VS INSTANT)
+-- 8. SAFE MOVEMENT CONTROLLER & ZERO-FALL ANTI-GRAVITY ANCHOR
 -- ============================================================================
 local activeMoveConn = nil
+local SAFE_VOID_Y = 38.0 -- Halloween Island ground elevation is ~52.6. Anything below 38 is void drop!
+
+-- Raycast down to find ground elevation and add safe clearance
+local function GetSafeAltitudePos(rawPos, hoverHeight)
+    hoverHeight = hoverHeight or 2.5
+    local rayOrigin = rawPos + Vector3.new(0, 15, 0)
+    local rayDir = Vector3.new(0, -45, 0)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local char = LocalPlayer.Character
+    if char then
+        rayParams.FilterDescendantsInstances = { char }
+    end
+
+    local hit = Workspace:Raycast(rayOrigin, rayDir, rayParams)
+    if hit and hit.Position then
+        return Vector3.new(rawPos.X, hit.Position.Y + hoverHeight, rawPos.Z)
+    end
+
+    return rawPos + Vector3.new(0, hoverHeight, 0)
+end
 
 local function StopMovement()
     if activeMoveConn then
@@ -238,27 +280,47 @@ local function StopMovement()
     end
 end
 
+local function CheckAndRescueFromVoid()
+    local hrp, hum = GetCharParts()
+    if not hrp or not hum or hum.Health <= 0 then return end
+
+    if hrp.Position.Y < SAFE_VOID_Y then
+        StopMovement()
+        hrp.Anchored = true
+        hrp.CFrame = CFrame.new(HALLOWEEN_RESTING_POS)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+        task.wait(0.1)
+        hrp.Anchored = false
+        warn("[AntEmpire Harvester]: Rescued character from void drop! Teleported safely to Halloween Island.")
+    end
+end
+
 local function MoveToTarget(targetPos, arrivalDistance)
-    arrivalDistance = arrivalDistance or 3.0
+    arrivalDistance = arrivalDistance or 3.5
     local hrp, hum = GetCharParts()
     if not hrp or not hum or hum.Health <= 0 then return false end
 
     StopMovement()
     EnableNoclip()
 
-    -- Instant Teleport Mode
+    local safeTargetPos = GetSafeAltitudePos(targetPos, 2.5)
+
+    -- Instant Teleport Mode (Anchored lock prevents any downward gravity drop)
     if Config.FlyMode == "Instant" then
         hrp.AssemblyLinearVelocity = Vector3.zero
         hrp.AssemblyAngularVelocity = Vector3.zero
-        hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 1.5, 0))
-        task.wait(0.1)
+        hrp.CFrame = CFrame.new(safeTargetPos)
+        hrp.Anchored = true
+        task.wait(0.08)
+        hrp.Anchored = false
         return true
     end
 
     -- Realistic Broom Flight Mode (90 studs/sec - matches game config, completely safe)
     local speed = math.clamp(Config.FlightSpeed or BROOM_DEFAULT_SPEED, 30, 200)
     local startPos = hrp.Position
-    local totalDist = (targetPos - startPos).Magnitude
+    local totalDist = (safeTargetPos - startPos).Magnitude
     local maxDuration = (totalDist / speed) + 4.0
     local t0 = os.clock()
     local arrived = false
@@ -271,7 +333,7 @@ local function MoveToTarget(targetPos, arrivalDistance)
         end
 
         local curPos = hrp.Position
-        local delta = targetPos - curPos
+        local delta = safeTargetPos - curPos
         local dist = delta.Magnitude
 
         if dist <= arrivalDistance or (os.clock() - t0 > maxDuration) then
@@ -291,13 +353,13 @@ local function MoveToTarget(targetPos, arrivalDistance)
     end
 
     StopMovement()
-    hrp.CFrame = CFrame.new(targetPos)
+    hrp.CFrame = CFrame.new(safeTargetPos)
     task.wait(0.05)
     return true
 end
 
 -- ============================================================================
--- 9. AUTONOMOUS CANDY COLLECTION ENGINE
+-- 9. AUTONOMOUS CANDY COLLECTION ENGINE (ANCHORED ANTI-DROP)
 -- ============================================================================
 local workerThread = nil
 
@@ -308,12 +370,14 @@ local function OpenPumpkinChest(chest)
     local hrp, hum = GetCharParts()
     if not hrp or not hum then return end
 
-    -- Position character slightly above chest
-    local openPos = chest.Position + Vector3.new(0, 2.0, 0)
+    -- Position character safely and ANCHOR to eliminate any possible downward fall from gravity/noclip
+    local safeOpenPos = GetSafeAltitudePos(chest.Position, 2.5)
     hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.CFrame = CFrame.new(openPos, chest.Position)
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    hrp.CFrame = CFrame.lookAt(safeOpenPos, chest.Position)
+    hrp.Anchored = true
 
-    task.wait(0.1)
+    task.wait(0.08)
 
     -- Trigger proximity prompt
     pcall(function()
@@ -328,6 +392,7 @@ local function OpenPumpkinChest(chest)
 
     Config.CollectedCount = Config.CollectedCount + 1
     task.wait(math.clamp(Config.CollectDelay, 0.1, 1.5))
+    hrp.Anchored = false
 end
 
 local function StartCandyWorker()
@@ -347,17 +412,21 @@ local function StartCandyWorker()
                 continue
             end
 
+            -- Run anti-void watchdog
+            CheckAndRescueFromVoid()
+
             local availableChests = GetAvailablePumpkinChests()
             Config.RemainingChests = #availableChests
 
             if #availableChests > 0 then
+                EnableNoclip()
                 for idx, chest in ipairs(availableChests) do
                     if not Config.IsRunning then break end
                     if not chest.Prompt or not chest.Prompt.Enabled then continue end
 
-                    Config.Status = string.format("กำลังบินไปเปิด Pumpkin Chest [%d/%d] (ระยะ %.0f studs)...", idx, #availableChests, chest.Distance)
+                    Config.Status = string.format("กำลังวาร์ปไปเปิด Pumpkin Chest [%d/%d] (ระยะ %.0f studs)...", idx, #availableChests, chest.Distance)
                     
-                    local arrived = MoveToTarget(chest.Position + Vector3.new(0, 2.5, 0), 4.0)
+                    local arrived = MoveToTarget(chest.Position, 3.5)
                     if arrived and Config.IsRunning and chest.Prompt and chest.Prompt.Enabled then
                         Config.Status = string.format("กำลังเก็บ Candy จากหีบ [%d/%d]...", idx, #availableChests)
                         OpenPumpkinChest(chest)
@@ -367,11 +436,16 @@ local function StartCandyWorker()
                 end
             else
                 Config.Status = "เก็บ Candy หมดเกาะแล้ว กำลังรอ Pumpkin Chest เกิดใหม่..."
-                -- Fly to safe observation position on the Halloween Island
+                -- Teleport/fly to safe observation position on the Halloween Island
                 local curDist = (hrp.Position - HALLOWEEN_RESTING_POS).Magnitude
                 if curDist > 15 then
                     MoveToTarget(HALLOWEEN_RESTING_POS, 5.0)
                 end
+
+                -- Stand safely on the island with normal collision so we never fall through floor
+                DisableNoclip()
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
                 task.wait(1.5)
             end
 
@@ -379,6 +453,8 @@ local function StartCandyWorker()
         end
 
         StopMovement()
+        local h, _ = GetCharParts()
+        if h then h.Anchored = false end
         DisableNoclip()
         Config.Status = "Idle"
     end)
@@ -398,6 +474,8 @@ local function StopCandyWorker()
         getgenv()._AntCandyWorker = nil
     end
     StopMovement()
+    local hrp, _ = GetCharParts()
+    if hrp then hrp.Anchored = false end
     DisableNoclip()
 end
 
@@ -517,3 +595,4 @@ HomeTab:Toggle({
         Config.AntiAfk = val
     end
 })
+
