@@ -3002,7 +3002,7 @@ end)
 task.spawn(function()
     while true do
         task.wait(0.02)
-        if (_G.AutoMelee or _G.AutoMob) and not _G.KillAura then
+        if _G.AutoMelee or _G.AutoMob or _G.KillAura then
             local char = LocalPlayer.Character
             local root = char and char:FindFirstChild("HumanoidRootPart")
             if root then
@@ -3068,22 +3068,45 @@ task.spawn(function()
     end
 end)
 
--- Pure Instant Kill Aura Engine (Direct Health = 0 without attacking or casting skills)
--- Directly zeros monster humanoid health (workspace.Folders.Monsters[mob].Monster.Health = 0)
+-- Authentic High-Speed Kill Aura Engine (Guaranteed Client Hitbox + Paced Server Remote Dispatch)
+-- Dispatches rapid attacks to every monster in the wave so server confirms damage and clears stages!
 task.spawn(function()
     while true do
         task.wait(0.02)
         if _G.KillAura then
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
             local monstersFolder = (Workspace:FindFirstChild("Folders") and Workspace.Folders:FindFirstChild("Monsters")) or Workspace:FindFirstChild("Monsters")
-            if monstersFolder then
+            if root and monstersFolder then
                 for _, mob in ipairs(monstersFolder:GetChildren()) do
                     if not _G.KillAura then break end
-                    if mob:IsA("Model") and mob ~= LocalPlayer.Character then
+                    if mob:IsA("Model") and mob ~= char then
                         local hum = mob:FindFirstChild("Monster") or mob:FindFirstChildOfClass("Humanoid")
-                        if hum and hum.Health > 0 then
+                        local mobRoot = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChild("Torso") or mob:FindFirstChild("UpperTorso")
+                        if mobRoot and isMonsterAlive(mob, hum) then
+                            -- 1. Direct Health = 0 (Instant local trigger for Extreme Dimension waves)
+                            if hum and hum.Health > 0 then
+                                pcall(function() hum.Health = 0 end)
+                            end
+
+                            -- 2. Client Hitbox + Server Remote Packet to guarantee server-side kill & DPS registration
                             pcall(function()
-                                hum.Health = 0
+                                local modules = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Modules")
+                                local csm = modules and modules:FindFirstChild("ClientSkillModule")
+                                if csm then require(csm).basicAttack() end
                             end)
+
+                            if MainRemoteEvent then
+                                meleeCombo = (meleeCombo % 4) + 1
+                                local aimCF = CFrame.lookAt(root.Position, mobRoot.Position)
+                                MainRemoteEvent:FireServer("UseSkill", {
+                                    attackNumber = meleeCombo,
+                                    hrpCFrame = aimCF
+                                }, "BasicAttack")
+                            end
+
+                            -- 3. Clean pacing: 0.04s per monster (prevents packet drops and ensures server death confirmation)
+                            task.wait(0.04)
                         end
                     end
                 end
@@ -3096,7 +3119,7 @@ end)
 task.spawn(function()
     while true do
         task.wait(0.04)
-        if _G.AutoSkill and not _G.KillAura then
+        if _G.AutoSkill or _G.KillAura then
             local mob, mobRoot, hum = getLockedTarget()
             if mob and mobRoot and isMonsterAlive(mob, hum) then
                 local char = LocalPlayer.Character
@@ -3136,7 +3159,7 @@ end)
 task.spawn(function()
     while true do
         task.wait(0.05)
-        if _G.AutoAssistSkill and not _G.KillAura then
+        if _G.AutoAssistSkill or _G.KillAura then
             local mob, mobRoot, hum = getLockedTarget()
             if mob and mobRoot and isMonsterAlive(mob, hum) then
                 local char = LocalPlayer.Character
@@ -3169,7 +3192,7 @@ end)
 task.spawn(function()
     while true do
         task.wait(0.05)
-        if _G.AutoFruitSkill and not _G.KillAura then
+        if _G.AutoFruitSkill or _G.KillAura then
             local mob, mobRoot, hum = getLockedTarget()
             if mob and mobRoot and isMonsterAlive(mob, hum) then
                 local char = LocalPlayer.Character
@@ -3250,7 +3273,6 @@ end)
 local originalTryUseDash = nil
 applyDashNoCooldown = function(enabled)
     pcall(function()
-        LocalPlayer:SetAttribute("CardNoDashCooldown", enabled)
         local modules = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Modules")
         local csm = modules and modules:FindFirstChild("ClientSkillModule")
         if csm then
