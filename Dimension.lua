@@ -1,3 +1,8 @@
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
@@ -172,59 +177,52 @@ local applyDashNoCooldown = nil
 local isMainCharacterActive = nil
 
 -- Helper: Accurate Detection of Active Main Character (Checks unique Skill 1/2 vs Assist skills)
-_G.SavedMainSkills = _G.SavedMainSkills or {
-    "Midnight Slash",
-    "Midnight Meteorite",
-    "Midnight Hurricane",
-    "Midnight Divider"
-}
+_G.AssistActive = false
+_G.AssistCastTime = nil
 
--- Helper: Accurate Detection of Active Main Character (Supports Midnight / Shadow, Killua, or any saved loadout)
+-- Universal Character State Tracker:
+-- Guarantees that ANY character the user plays (Tanjiro, Gojo, Goku, Sukuna, Shadow, etc.) is recognized as Main.
+-- Returns false ONLY when an Assist skill was actively cast, preventing ANY infinite death loop.
 isMainCharacterActive = function()
-    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pGui then return true end
-
-    local mainSkillList = _G.SavedMainSkills or {}
-    if #mainSkillList == 0 then
-        table.insert(mainSkillList, "Midnight Slash")
-        table.insert(mainSkillList, "Midnight Meteorite")
-        table.insert(mainSkillList, "Midnight Hurricane")
-        table.insert(mainSkillList, "Midnight Divider")
+    if _G.AssistActive then
+        return false -- An Assist skill was actively cast!
     end
-
-    -- 1. Check if ANY Main character skill is visible on hotbar
-    for _, desc in ipairs(pGui:GetDescendants()) do
-        if desc:IsA("TextLabel") and desc.Visible then
-            local t = desc.Text:gsub("^%s*(.-)%s*$", "%1")
-            for _, mainName in ipairs(mainSkillList) do
-                if t == mainName or t:lower() == mainName:lower() then
-                    return true -- Main character is actively deployed!
-                end
-            end
-            if t:find("Midnight") or t:find("Slash") then
-                return true
-            end
-        end
-    end
-
-    -- 2. Check if known Assist character skills are active on hotbar (Killua / Smash)
-    for _, desc in ipairs(pGui:GetDescendants()) do
-        if desc:IsA("TextLabel") and desc.Visible then
-            local t = desc.Text:gsub("^%s*(.-)%s*$", "%1")
-            -- Assist 1 (Killua)
-            if t == "Thunder Palm" or t == "Lightning Rain" or t == "Whirlwind" or t == "Divine Speed" or t:find("Palm") then
-                return false -- Swapped into Assist 1!
-            end
-            -- Assist 2 (Smash)
-            if t == "Finger Smash" or t == "Hand Smash" or t == "Flying Smash" or t == "Lightning Smash" or t:find("Smash") then
-                return false -- Swapped into Assist 2!
-            end
-        end
-    end
-
-    -- 3. Safe fallback: assume Main is active to prevent infinite loop
+    -- Default to true: Player is 100% in their Main character!
     return true
 end
+
+-- Clear AssistActive flag upon character respawn
+LocalPlayer.CharacterAdded:Connect(function()
+    _G.AssistActive = false
+    _G.AssistCastTime = nil
+end)
+
+-- Hook ClientSkillModule.useAssistSkill to track Assist activation from keybinds/UI
+local function hookAssistSkillEngine()
+    pcall(function()
+        local modules = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Modules")
+        local csm = modules and modules:FindFirstChild("ClientSkillModule")
+        if csm then
+            local mod = require(csm)
+            if mod and mod.useAssistSkill and not mod._slhAssistResetHooked then
+                mod._slhAssistResetHooked = true
+                local oldUseAssist = mod.useAssistSkill
+                mod.useAssistSkill = function(...)
+                    _G.AssistActive = true
+                    _G.AssistCastTime = tick()
+                    return oldUseAssist(...)
+                end
+            end
+        end
+    end)
+end
+
+task.spawn(function()
+    while true do
+        hookAssistSkillEngine()
+        task.wait(2)
+    end
+end)
 
 -- Combat & InGame Controls
 _G.Method = _G.Method or "Above"
@@ -2737,13 +2735,15 @@ end
 -- Check if a monster is truly alive (Official Anime Dimensions IsDead attribute)
 local function isMonsterAlive(mob, hum)
     if not mob or not mob.Parent then return false end
+    if not mob:IsDescendantOf(Workspace) then return false end
     if mob:GetAttribute("IsDead") == true then return false end
     if mob:FindFirstChild("Dead") or mob:FindFirstChild("IsDead") then return false end
-    if not hum or hum.Health <= 0 then return false end
     return true
 end
 
--- Ultra-Fast Nearest Living Monster Selector
+-- Anti-Kick Wave-by-Wave Monster Selector:
+-- Strictly targets the nearest active monster on the current wave.
+-- Prevents prematurely warping through gates into the locked boss arena (which caused Error 267 kick)!
 local function getClosestMonster()
     local char = LocalPlayer.Character
     if not char then return nil, nil, nil end
@@ -2762,13 +2762,7 @@ local function getClosestMonster()
             local mobRoot = child:FindFirstChild("HumanoidRootPart") or child:FindFirstChild("Torso") or child:FindFirstChild("UpperTorso")
             if mobRoot and isMonsterAlive(child, hum) then
                 local dist = (mobRoot.Position - root.Position).Magnitude
-                -- Priority: Boss (matches boss name or attribute, including Plated Giant)
-                local mobName = child.Name:lower()
-                local isBoss = child:FindFirstChild("Boss") or mobName:find("boss") ~= nil or child:GetAttribute("IsBoss") == true or mobName:find("giant") ~= nil or mobName:find("titan") ~= nil or mobName:find("akaza") ~= nil
-                if isBoss and dist < 1500 then
-                    return child, mobRoot, hum
-                end
-
+                -- Strictly follow proximity order: clear wave 1, wave 2, wave 3, then boss naturally
                 if dist < shortestDist then
                     shortestDist = dist
                     closestMob = child
@@ -2844,7 +2838,7 @@ local currentTargetHum = nil
 -- Never switches targets mid-fight! Only resets and warps to the next monster after the current one dies.
 getLockedTarget = function()
     if currentTargetMob and currentTargetMob.Parent and currentTargetRoot and currentTargetRoot.Parent and currentTargetHum and currentTargetHum.Parent then
-        if isMonsterAlive(currentTargetMob, currentTargetHum) and currentTargetHum.Health > 0 then
+        if isMonsterAlive(currentTargetMob, currentTargetHum) then
             return currentTargetMob, currentTargetRoot, currentTargetHum
         end
     end
@@ -2856,7 +2850,7 @@ getLockedTarget = function()
 
     -- Acquire the next closest alive monster
     local mob, mobRoot, hum = getClosestMonster()
-    if mob and mobRoot and hum and isMonsterAlive(mob, hum) and hum.Health > 0 then
+    if mob and mobRoot and hum and isMonsterAlive(mob, hum) then
         currentTargetMob = mob
         currentTargetRoot = mobRoot
         currentTargetHum = hum
@@ -2867,24 +2861,44 @@ getLockedTarget = function()
 end
 
 computeTargetCFrame = function(mobRoot)
-    local method = _G.Method or "Above"
-    local dist = tonumber(_G.ImportDistance) or 7.0
-    if dist < 1.0 then dist = 1.0 end
+    if not mobRoot or not mobRoot.Parent then return CFrame.new() end
 
-    if method == "Behind" then
-        return mobRoot.CFrame * CFrame.new(0, 0, dist)
-    elseif method == "Front" then
-        return mobRoot.CFrame * CFrame.new(0, 0, -dist) * CFrame.Angles(0, math.pi, 0)
-    elseif method == "Over" or method == "Above" then
-        -- Authentic SLH Hub Over/Above Formula:
-        -- Places player at 'dist' altitude above monster, looking directly down (-pi/2)
-        -- Mobs on the ground CANNOT hit the player, and sword swings hit straight down!
-        return mobRoot.CFrame * CFrame.new(0, dist, 0) * CFrame.Angles(-math.pi / 2, 0, 0)
-    elseif method == "Under" or method == "Below" then
-        return mobRoot.CFrame * CFrame.new(0, -dist, 0) * CFrame.Angles(math.pi / 2, 0, 0)
+    local method = _G.Method
+    if (not method or method == "") and library and library.flags then
+        method = library.flags["Method"]
+    end
+    method = method or "Above"
+
+    local rawDist = _G.ImportDistance
+    if rawDist == nil and library and library.flags then
+        rawDist = library.flags["ImportDistance(OnlyNumber)"]
+    end
+    local dist = tonumber(rawDist) or 7.0
+    if dist < 0.1 then dist = 0.1 end
+
+    local mobPos = mobRoot.Position
+    local look = mobRoot.CFrame.LookVector
+    local horizLook = Vector3.new(look.X, 0, look.Z)
+    if horizLook.Magnitude > 0.001 then
+        horizLook = horizLook.Unit
+    else
+        horizLook = Vector3.new(0, 0, -1)
     end
 
-    return mobRoot.CFrame * CFrame.new(0, dist, 0) * CFrame.Angles(-math.pi / 2, 0, 0)
+    local m = string.lower(tostring(method))
+    if m == "behind" or m == "back" then
+        local targetPos = mobPos - (horizLook * dist)
+        return CFrame.lookAt(targetPos, mobPos)
+    elseif m == "front" then
+        local targetPos = mobPos + (horizLook * dist)
+        return CFrame.lookAt(targetPos, mobPos)
+    elseif m == "under" or m == "below" then
+        local targetPos = Vector3.new(mobPos.X, mobPos.Y - dist, mobPos.Z)
+        return CFrame.lookAt(targetPos, mobPos + (horizLook * 0.05))
+    else -- "above", "over", or default
+        local targetPos = Vector3.new(mobPos.X, mobPos.Y + dist, mobPos.Z)
+        return CFrame.lookAt(targetPos, mobPos + (horizLook * 0.05))
+    end
 end
 
 -- Instant Warp Engine (Zero Lerp Latency - Instantly snaps to target position)
@@ -3054,35 +3068,22 @@ task.spawn(function()
     end
 end)
 
--- Map-Wide Kill Aura Engine (Attacks all living monsters across the dimension)
+-- Pure Instant Kill Aura Engine (Direct Health = 0 without attacking or casting skills)
+-- Directly zeros monster humanoid health (workspace.Folders.Monsters[mob].Monster.Health = 0)
 task.spawn(function()
     while true do
-        task.wait(0.015)
+        task.wait(0.02)
         if _G.KillAura then
-            local char = LocalPlayer.Character
-            local root = char and char:FindFirstChild("HumanoidRootPart")
-            if root then
-                local monstersFolder = (Workspace:FindFirstChild("Folders") and Workspace.Folders:FindFirstChild("Monsters")) or Workspace:FindFirstChild("Monsters")
-                if monstersFolder then
-                    for _, mob in ipairs(monstersFolder:GetChildren()) do
-                        if mob:IsA("Model") and mob ~= char then
-                            local hum = mob:FindFirstChild("Monster") or mob:FindFirstChildOfClass("Humanoid")
-                            local mobRoot = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChild("Torso")
-                            if mobRoot and isMonsterAlive(mob, hum) then
-                                meleeCombo = (meleeCombo % 4) + 1
-                                local aimCF = CFrame.lookAt(root.Position, mobRoot.Position)
-                                pcall(function()
-                                    local modules = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Modules")
-                                    local csm = modules and modules:FindFirstChild("ClientSkillModule")
-                                    if csm then require(csm).basicAttack() end
-                                end)
-                                if MainRemoteEvent then
-                                    MainRemoteEvent:FireServer("UseSkill", {
-                                        attackNumber = meleeCombo,
-                                        hrpCFrame = aimCF
-                                    }, "BasicAttack")
-                                end
-                            end
+            local monstersFolder = (Workspace:FindFirstChild("Folders") and Workspace.Folders:FindFirstChild("Monsters")) or Workspace:FindFirstChild("Monsters")
+            if monstersFolder then
+                for _, mob in ipairs(monstersFolder:GetChildren()) do
+                    if not _G.KillAura then break end
+                    if mob:IsA("Model") and mob ~= LocalPlayer.Character then
+                        local hum = mob:FindFirstChild("Monster") or mob:FindFirstChildOfClass("Humanoid")
+                        if hum and hum.Health > 0 then
+                            pcall(function()
+                                hum.Health = 0
+                            end)
                         end
                     end
                 end
@@ -3095,12 +3096,12 @@ end)
 task.spawn(function()
     while true do
         task.wait(0.04)
-        if _G.AutoSkill or _G.KillAura then
+        if _G.AutoSkill and not _G.KillAura then
             local mob, mobRoot, hum = getLockedTarget()
             if mob and mobRoot and isMonsterAlive(mob, hum) then
                 local char = LocalPlayer.Character
                 local root = char and char:FindFirstChild("HumanoidRootPart")
-                local maxDist = tonumber(_G.DistanceToSkill) or 40
+                local maxDist = math.max(tonumber(_G.DistanceToSkill) or 40, 55)
                 if root and (mobRoot.Position - root.Position).Magnitude <= maxDist then
                     local aimCF = CFrame.lookAt(root.Position, mobRoot.Position)
                     local prioritySlots = {
@@ -3135,7 +3136,7 @@ end)
 task.spawn(function()
     while true do
         task.wait(0.05)
-        if (_G.AutoAssistSkill or _G.KillAura) and not _G.AutoResetToMain then
+        if _G.AutoAssistSkill and not _G.KillAura then
             local mob, mobRoot, hum = getLockedTarget()
             if mob and mobRoot and isMonsterAlive(mob, hum) then
                 local char = LocalPlayer.Character
@@ -3153,6 +3154,8 @@ task.spawn(function()
                                 local csm = LocalPlayer.PlayerGui.Modules.ClientSkillModule
                                 if csm then require(csm).useAssistSkill(slot) end
                             end)
+                            _G.AssistActive = true
+                            _G.AssistCastTime = tick()
                             task.wait(0.08)
                         end
                     end
@@ -3166,7 +3169,7 @@ end)
 task.spawn(function()
     while true do
         task.wait(0.05)
-        if _G.AutoFruitSkill or _G.KillAura then
+        if _G.AutoFruitSkill and not _G.KillAura then
             local mob, mobRoot, hum = getLockedTarget()
             if mob and mobRoot and isMonsterAlive(mob, hum) then
                 local char = LocalPlayer.Character
@@ -3229,13 +3232,12 @@ RunService.Heartbeat:Connect(function(dt)
     end
 end)
 
--- Stepped Zero-Drop Enforcer (Runs BEFORE physics step so server & client physics never drop to floor)
+-- Physics Velocity Damper (Keeps linear velocity stable without locking CFrame)
 RunService.Stepped:Connect(function()
     if _G.AutoMob or _G.KillAura then
         local char = LocalPlayer.Character
         local root = char and char:FindFirstChild("HumanoidRootPart")
-        if root and lastValidTargetCF then
-            root.CFrame = lastValidTargetCF
+        if root then
             root.AssemblyLinearVelocity = Vector3.zero
         end
     end
@@ -3411,56 +3413,42 @@ task.spawn(function()
                     end
                     task.wait(3)
                     isCreatingRoom = false
-                    continue
-                end
+                else
+                    local selectedMap = _G.MapSelection or "Titan Dimension"
+                    if _G.AutoSelectMap then
+                        local pLevel = getPlayerLevel()
+                        selectedMap = getBestDimensionForLevel(pLevel)
+                        _G.MapSelection = selectedMap
+                    end
 
-                local selectedMap = _G.MapSelection or "Titan Dimension"
-                if _G.AutoSelectMap then
-                    local pLevel = getPlayerLevel()
-                    selectedMap = getBestDimensionForLevel(pLevel)
-                    _G.MapSelection = selectedMap
-                end
+                    local selectedDiff = _G.SelectDifficulty or "Easy"
+                    local isHardcore = _G.Hardcore or false
+                    local isFriendOnly = (_G.FriendOnly ~= nil and _G.FriendOnly) or true
 
-                local selectedDiff = _G.SelectDifficulty or "Easy"
-                local isHardcore = _G.Hardcore or false
-                local isFriendOnly = (_G.FriendOnly ~= nil and _G.FriendOnly) or true
+                    -- Create room with official payload table
+                    if MainRemoteFunction then
+                        local createPayload = {
+                            MapName = selectedMap,
+                            Difficulty = selectedDiff,
+                            FriendsOnly = isFriendOnly,
+                            Hardcore = isHardcore
+                        }
 
-                -- Create room with official payload table
-                if MainRemoteFunction then
-                    local createPayload = {
-                        MapName = selectedMap,
-                        Difficulty = selectedDiff,
-                        FriendsOnly = isFriendOnly,
-                        Hardcore = isHardcore
-                    }
-
-                    local success, res = pcall(function()
-                        return MainRemoteFunction:InvokeServer("CreateRoom", createPayload)
-                    end)
-
-                    if success and res and res.status == "Success" then
-                        task.wait(1)
-                        pcall(function()
-                            MainRemoteFunction:InvokeServer("TeleportPlayers")
+                        local success, res = pcall(function()
+                            return MainRemoteFunction:InvokeServer("CreateRoom", createPayload)
                         end)
-                    elseif success and res and res.message == "Already in a party" then
-                        local tpSuccess, tpRes = pcall(function()
-                            return MainRemoteFunction:InvokeServer("TeleportPlayers")
-                        end)
-                        if not tpSuccess or (tpRes and tpRes.status == "Fail") then
+
+                        if success and res and res.status == "Success" then
+                            task.wait(1)
                             pcall(function()
-                                MainRemoteFunction:InvokeServer("LeaveParty")
-                            end)
-                            pcall(function()
-                                local rm = require(LocalPlayer.PlayerGui.Modules.RoomModule)
-                                if rm and rm.leaveParty then rm.leaveParty() end
+                                MainRemoteFunction:InvokeServer("TeleportPlayers")
                             end)
                         end
                     end
-                end
 
-                task.wait(4)
-                isCreatingRoom = false
+                    task.wait(4)
+                    isCreatingRoom = false
+                end
             end
         end
     end
@@ -3491,62 +3479,123 @@ task.spawn(function()
     end
 end)
 
--- AutoReplay & Match Completion Watchdog (UniversalCenterUIFrame ResultUI / RetryDungeonButton)
+-- Comprehensive Match Result & Replay Button Detector
+local function getActiveResultUIAndButton()
+    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local universalGui = pGui and pGui:FindFirstChild("UniversalGui")
+    if not universalGui then return false, nil end
+    local centerFrame = universalGui:FindFirstChild("UniversalCenterUIFrame")
+    if not centerFrame then return false, nil end
+
+    -- 1. Scan all known Anime Dimensions Result UI containers
+    local resultFrames = {
+        "ResultUI", "DungeonResultUI", "RaidResultUI",
+        "InfiniteResultUI", "SpeedRaidResultUI", "ChallengeResultUI", "BossRushResultUI"
+    }
+    for _, name in ipairs(resultFrames) do
+        local frame = centerFrame:FindFirstChild(name)
+        if frame and frame.Visible then
+            local btn = frame:FindFirstChild("RetryDungeonButton", true)
+                or frame:FindFirstChild("RetryButton", true)
+                or frame:FindFirstChild("ReplayButton", true)
+                or frame:FindFirstChild("Replay", true)
+            return true, btn
+        end
+    end
+
+    -- 2. Scan all descendants in centerFrame for active Retry/Replay button
+    for _, desc in ipairs(centerFrame:GetDescendants()) do
+        if desc:IsA("GuiButton") and (desc.Name:find("Retry") or desc.Name:find("Replay")) then
+            if desc.Visible then
+                return true, desc
+            end
+        end
+    end
+
+    return false, nil
+end
+
 task.spawn(function()
     while true do
-        task.wait(0.5)
+        task.wait(1.0)
         if _G.AutoReplay and not isPlayerInLobby() then
-            local pGui = LocalPlayer:FindFirstChild("PlayerGui")
-            local universalGui = pGui and pGui:FindFirstChild("UniversalGui")
-            local centerFrame = universalGui and universalGui:FindFirstChild("UniversalCenterUIFrame")
+            local isMatchCompleted, retryBtn = getActiveResultUIAndButton()
 
-            local resultUI = centerFrame and centerFrame:FindFirstChild("ResultUI")
-            local raidResult = centerFrame and centerFrame:FindFirstChild("RaidResultUI")
-            local retryBtn = (resultUI and resultUI:FindFirstChild("RetryDungeonButton", true))
-                or (centerFrame and centerFrame:FindFirstChild("RetryDungeonButton", true))
+            if isMatchCompleted then
+                task.wait(1.5)
 
-            local matchCompleted = (resultUI and resultUI.Visible)
-                or (raidResult and raidResult.Visible)
-
-            if matchCompleted then
-                task.wait(1)
-
-                -- Check if Raid is open and should abort replay
-                if _G.StopReplayIfRaidOpen then
-                    local raidNotif = centerFrame and centerFrame:FindFirstChild("RaidNotification")
+                -- Check if Raid is open and user configured to abort replay
+                local shouldAbortReplay = false
+                if _G.StopReplayIfRaidOpen or _G.StopReplay then
+                    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+                    local center = pGui and pGui:FindFirstChild("UniversalGui") and pGui.UniversalGui:FindFirstChild("UniversalCenterUIFrame")
+                    local raidNotif = center and center:FindFirstChild("RaidNotification")
                     if raidNotif and raidNotif.Visible then
-                        if _G.BackToLobbyIfRaidOpen then
-                            TeleportService:Teleport(6938803436, LocalPlayer)
-                            return
+                        shouldAbortReplay = true
+                        if _G.GoLobbyMethod == "ResetCharacter" then
+                            local char = LocalPlayer.Character
+                            local hum = char and char:FindFirstChildOfClass("Humanoid")
+                            if hum then hum.Health = 0 end
+                        else
+                            if MainRemoteFunction then
+                                pcall(function() MainRemoteFunction:InvokeServer("TeleportToLobby") end)
+                            end
                         end
+                        task.wait(5)
                     end
                 end
 
-                -- Replay Dungeon (Authentic Anime Dimensions Remote & UI Click)
-                if MainRemoteEvent then
-                    pcall(function()
-                        MainRemoteEvent:FireServer("RetryDungeon")
-                    end)
-                end
+                if not shouldAbortReplay then
+                    -- Method 1: Authentic Server RemoteFunction Replay Invocation
+                    if MainRemoteFunction then
+                        pcall(function()
+                            MainRemoteFunction:InvokeServer("ReplayDimension")
+                        end)
+                        pcall(function()
+                            MainRemoteFunction:InvokeServer("ReplayDungeon")
+                        end)
+                    end
 
-                if retryBtn and retryBtn.Visible then
+                -- Method 2: Firesignal Direct Button Clicks
+                if retryBtn then
                     pcall(function()
                         if firesignal then
                             firesignal(retryBtn.Activated)
                             firesignal(retryBtn.MouseButton1Click)
                             firesignal(retryBtn.MouseButton1Down)
+                            firesignal(retryBtn.MouseButton1Up)
                         end
+                    end)
+                    -- Virtual mouse click fallback
+                    pcall(function()
+                        local absPos = retryBtn.AbsolutePosition
+                        local absSize = retryBtn.AbsoluteSize
+                        local clickX = absPos.X + absSize.X / 2
+                        local clickY = absPos.Y + absSize.Y / 2
+                        VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
+                        task.wait(0.04)
+                        VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
                     end)
                 end
 
+                -- Method 3: Game Client UIModule Dispatch
                 pcall(function()
+                    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
                     local uim = pGui and pGui:FindFirstChild("Modules") and pGui.Modules:FindFirstChild("UIModule")
                     if uim then
-                        require(uim).selectResultButton("RetryDungeonButton")
+                        local mod = require(uim)
+                        if mod.selectResultButton then
+                            mod.selectResultButton("RetryDungeonButton")
+                            mod.selectResultButton("ReplayButton")
+                        end
+                        if mod.replayDimension then
+                            mod.replayDimension()
+                        end
                     end
                 end)
+                end
 
-                task.wait(4)
+                task.wait(6)
             end
         end
     end
@@ -4063,20 +4112,23 @@ task.spawn(function()
     end
 end)
 
--- Auto Reset to Main in Battle Engine (Suicide Die/Respawn to Main ONLY when Assist is active)
+-- Auto Reset to Main in Battle Engine:
+-- ONLY resets the character (by dying) AFTER an Assist skill was actually cast in battle!
+-- Once respawned as Main, it NEVER resets again. Zero infinite suicide loops for ANY character!
 task.spawn(function()
     while true do
-        task.wait(1.5)
+        task.wait(0.2)
         if not isPlayerInLobby() and _G.AutoResetToMain and not _G.AutoResetToFirstAssist then
             pcall(function()
-                local char = LocalPlayer.Character
-                local hum = char and char:FindFirstChildOfClass("Humanoid")
-
-                -- Accurately check if current active character is NOT Main (Assist skills active)
-                if hum and hum.Health > 0 and isMainCharacterActive and not isMainCharacterActive() then
-                    -- Reset character by dying so it respawns as Main character immediately!
-                    hum.Health = 0
-                    task.wait(4.5) -- Wait for respawn and HUD load
+                if _G.AssistActive and _G.AssistCastTime and (tick() - _G.AssistCastTime >= 1.2) then
+                    _G.AssistActive = false
+                    _G.AssistCastTime = nil
+                    local char = LocalPlayer.Character
+                    local hum = char and char:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        hum.Health = 0
+                        task.wait(4.0) -- Wait for respawn back into Main
+                    end
                 end
             end)
         end
