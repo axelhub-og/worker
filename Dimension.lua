@@ -3068,26 +3068,45 @@ task.spawn(function()
     end
 end)
 
--- Pure Instant Kill Aura Engine (Direct Health = 0 without attacking or casting skills)
+-- Ultra-Fast Instant Kill Aura Engine (Zero Latency + ChildAdded Instant Trigger)
 -- Directly zeros monster humanoid health (workspace.Folders.Monsters[mob].Monster.Health = 0)
+local function applyKillAuraToMob(mob)
+    if not _G.KillAura or not mob:IsA("Model") or mob == LocalPlayer.Character then return end
+    local hum = mob:FindFirstChild("Monster") or mob:FindFirstChildOfClass("Humanoid")
+    if hum and hum.Health > 0 then
+        pcall(function() hum.Health = 0 end)
+    end
+end
+
 task.spawn(function()
     while true do
-        task.wait(0.02)
+        task.wait(0.01)
         if _G.KillAura then
             local monstersFolder = (Workspace:FindFirstChild("Folders") and Workspace.Folders:FindFirstChild("Monsters")) or Workspace:FindFirstChild("Monsters")
             if monstersFolder then
                 for _, mob in ipairs(monstersFolder:GetChildren()) do
                     if not _G.KillAura then break end
-                    if mob:IsA("Model") and mob ~= LocalPlayer.Character then
-                        local hum = mob:FindFirstChild("Monster") or mob:FindFirstChildOfClass("Humanoid")
-                        if hum and hum.Health > 0 then
-                            pcall(function()
-                                hum.Health = 0
-                            end)
-                        end
-                    end
+                    applyKillAuraToMob(mob)
                 end
             end
+        end
+    end
+end)
+
+-- Instant Zero-Latency Spawn Execution: triggers the exact millisecond mob enters workspace
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        local monstersFolder = (Workspace:FindFirstChild("Folders") and Workspace.Folders:FindFirstChild("Monsters")) or Workspace:FindFirstChild("Monsters")
+        if monstersFolder and not monstersFolder:GetAttribute("SLH_KillAuraHooked") then
+            monstersFolder:SetAttribute("SLH_KillAuraHooked", true)
+            monstersFolder.ChildAdded:Connect(function(child)
+                if _G.KillAura then
+                    task.defer(function()
+                        applyKillAuraToMob(child)
+                    end)
+                end
+            end)
         end
     end
 end)
